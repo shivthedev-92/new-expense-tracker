@@ -38,8 +38,10 @@ class TransactionIn(BaseModel):
     group_name: str | None = None
     source: str | None = None
     merchant: str
+    alias: str | None = None
     amount: float
     spent_on: date
+    excluded_from_totals: bool = False
     notes: str | None = None
 
 

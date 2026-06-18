@@ -8,7 +8,7 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect, select, text
 from sqlalchemy.orm import Session
 
 from .config import settings
@@ -46,6 +46,12 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 def initialize_database() -> None:
     try:
         Base.metadata.create_all(bind=engine)
+        with engine.begin() as connection:
+            columns = {column["name"] for column in inspect(connection).get_columns("transactions")}
+            if "excluded_from_totals" not in columns:
+                connection.execute(text("ALTER TABLE transactions ADD COLUMN excluded_from_totals BOOLEAN NOT NULL DEFAULT FALSE"))
+            if "alias" not in columns:
+                connection.execute(text("ALTER TABLE transactions ADD COLUMN alias VARCHAR(160)"))
     except SQLAlchemyError as exc:
         print(f"Database initialization skipped: {exc}")
 
@@ -132,11 +138,10 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     if db.scalar(select(User).where(User.email == payload.email)):
         raise HTTPException(status_code=409, detail="Email is already registered")
 
-    user = User(email=payload.email, name=payload.name, password_hash=pwd_context.hash(payload.password), salary=7200)
+    user = User(email=payload.email, name=payload.name, password_hash=pwd_context.hash(payload.password), salary=0)
     db.add(user)
     db.commit()
     db.refresh(user)
-    seed_user_data(db, user)
     return AuthResponse(access_token=create_token(user), user=user)
 
 
@@ -145,7 +150,6 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     user = db.scalar(select(User).where(User.email == payload.email))
     if not user or not pwd_context.verify(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    seed_user_data(db, user)
     return AuthResponse(access_token=create_token(user), user=user)
 
 
@@ -226,6 +230,35 @@ def create_loan(payload: LoanIn, user: User = Depends(current_user), db: Session
     db.commit()
     db.refresh(loan)
     return loan
+
+
+@app.put("/loans/{loan_id}", response_model=LoanOut)
+def update_loan(
+    loan_id: int,
+    payload: LoanIn,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    loan = db.scalar(select(Loan).where(Loan.id == loan_id, Loan.user_id == user.id))
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+
+    for key, value in payload.model_dump().items():
+        setattr(loan, key, value)
+    db.commit()
+    db.refresh(loan)
+    return loan
+
+
+@app.delete("/loans/{loan_id}", status_code=204)
+def delete_loan(loan_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    loan = db.scalar(select(Loan).where(Loan.id == loan_id, Loan.user_id == user.id))
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+
+    db.delete(loan)
+    db.commit()
+    return None
 
 
 @app.get("/dashboard")

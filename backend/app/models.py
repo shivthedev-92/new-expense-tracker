@@ -40,8 +40,10 @@ class Transaction(Base):
     group_name: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     source: Mapped[str | None] = mapped_column(String(120), nullable=True)
     merchant: Mapped[str] = mapped_column(String(160))
+    alias: Mapped[str | None] = mapped_column(String(160), nullable=True)
     amount: Mapped[float] = mapped_column(Float)
     spent_on: Mapped[date] = mapped_column(Date, default=date.today)
+    excluded_from_totals: Mapped[bool] = mapped_column(Boolean, default=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
