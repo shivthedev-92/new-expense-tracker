@@ -53,12 +53,21 @@ class TransactionOut(TransactionIn):
 
 
 class LoanIn(BaseModel):
+    account_type: str = "loan"
     lender: str
     principal: float
     outstanding: float
     emi: float
     due_day: int = 1
     interest_rate: float = 0
+    tenure_months: int | None = None
+    periods_paid: int | None = None
+    credit_limit: float | None = None
+    card_outstanding: float | None = None
+    emi_outstanding: float | None = None
+    monthly_emi: float | None = None
+    minimum_due: float | None = None
+    emi_plans: list[dict] | None = None
 
 
 class LoanOut(LoanIn):

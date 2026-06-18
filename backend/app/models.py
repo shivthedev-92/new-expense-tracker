@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from enum import Enum
 
-from sqlalchemy import Boolean, Date, DateTime, Enum as SqlEnum, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Enum as SqlEnum, Float, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -55,11 +55,20 @@ class Loan(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    account_type: Mapped[str] = mapped_column(String(40), default="loan")
     lender: Mapped[str] = mapped_column(String(160))
     principal: Mapped[float] = mapped_column(Float)
     outstanding: Mapped[float] = mapped_column(Float)
     emi: Mapped[float] = mapped_column(Float)
     due_day: Mapped[int] = mapped_column(Integer, default=1)
     interest_rate: Mapped[float] = mapped_column(Float, default=0)
+    tenure_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    periods_paid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    credit_limit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    card_outstanding: Mapped[float | None] = mapped_column(Float, nullable=True)
+    emi_outstanding: Mapped[float | None] = mapped_column(Float, nullable=True)
+    monthly_emi: Mapped[float | None] = mapped_column(Float, nullable=True)
+    minimum_due: Mapped[float | None] = mapped_column(Float, nullable=True)
+    emi_plans: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     user: Mapped[User] = relationship(back_populates="loans")

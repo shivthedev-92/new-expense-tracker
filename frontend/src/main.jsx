@@ -31,8 +31,6 @@ import {
   WalletCards,
 } from "lucide-react";
 import {
-  Area,
-  AreaChart,
   Bar,
   BarChart,
   CartesianGrid,
@@ -60,9 +58,10 @@ const transactionsSeed = [
 ];
 
 const loansSeed = [
-  { id: 1, lender: "Home Loan", principal: 240000, outstanding: 214500, emi: 1850, dueDay: 1, rate: 6.4, schedule: [{ dueDate: "2026-06-01", amount: 1850, paidDate: "2026-06-01" }] },
-  { id: 2, lender: "Car Loan", principal: 28000, outstanding: 16400, emi: 540, dueDay: 3, rate: 7.1, schedule: [{ dueDate: "2026-06-03", amount: 540, paidDate: "2026-06-05" }] },
-  { id: 3, lender: "Education Loan", principal: 42000, outstanding: 17800, emi: 620, dueDay: 5, rate: 5.8, schedule: [{ dueDate: "2026-06-05", amount: 620, paidDate: "" }] },
+  { id: 1, accountType: "loan", lender: "Home Loan", principal: 240000, outstanding: 214500, emi: 1850, dueDay: 1, rate: 6.4, tenureMonths: 180, periodsPaid: 14, schedule: [{ dueDate: "2026-06-01", amount: 1850, paidDate: "2026-06-01" }] },
+  { id: 2, accountType: "loan", lender: "Car Loan", principal: 28000, outstanding: 16400, emi: 540, dueDay: 3, rate: 7.1, tenureMonths: 60, periodsPaid: 21, schedule: [{ dueDate: "2026-06-03", amount: 540, paidDate: "2026-06-05" }] },
+  { id: 3, accountType: "loan", lender: "Education Loan", principal: 42000, outstanding: 17800, emi: 620, dueDay: 5, rate: 5.8, tenureMonths: 84, periodsPaid: 39, schedule: [{ dueDate: "2026-06-05", amount: 620, paidDate: "" }] },
+  { id: 4, accountType: "credit-card", lender: "Travel Credit Card", principal: 100000, outstanding: 93000, emi: 7500, dueDay: 12, rate: 36, creditLimit: 100000, cardOutstanding: 93000, emiOutstanding: 50000, monthlyEmi: 7500, minimumDue: 12000, emiPlans: [{ name: "MacBook EMI", purchased: "Laptop", loanedAmount: 90000, outstanding: 50000, monthlyEmi: 7500, totalEmis: 12, completedEmis: 5 }], schedule: [] },
 ];
 
 const commitmentsSeed = [
@@ -132,13 +131,29 @@ const apiBaseUrl = "http://127.0.0.1:8000";
 const authStorageKey = "hermes_exp_auth_token";
 const onboardingStoragePrefix = "hermes_exp_onboarded";
 const incomeSourcesStoragePrefix = "hermes_exp_income_sources";
+const incomeChartColor = "#16a34a";
+const expenseChartColor = "#dc2626";
 
 function money(value) {
   return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(value);
 }
 
+function chartMoney(value) {
+  return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
+}
+
 function monthKey(value) {
   return value.slice(0, 7);
+}
+
+function monthLabel(value) {
+  return parseDate(`${value}-01`).toLocaleDateString("en-US", { month: "short", year: "numeric" });
+}
+
+function shiftMonth(value, offset) {
+  const date = parseDate(`${value}-01`);
+  date.setMonth(date.getMonth() + offset);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
 function parseDate(value) {
@@ -182,6 +197,48 @@ export function getTransactionsForView(transactions, view, anchorDate = referenc
     }
     return date.getFullYear() === anchor.getFullYear() && date.getMonth() === anchor.getMonth();
   });
+}
+
+export function transactionMonthOptions(transactions, fallbackDate = referenceDate) {
+  const months = [...new Set(transactions.map((transaction) => monthKey(transaction.date)).filter(Boolean))].sort().reverse();
+  return months.length ? months : [monthKey(fallbackDate)];
+}
+
+export function monthlyComparisonData(transactions, latestMonth = monthKey(latestTransactionDate(transactions)), recurringIncome = 0, monthCount = 6) {
+  const months = Array.from({ length: monthCount }, (_, index) => shiftMonth(latestMonth, index - monthCount + 1));
+  const rows = Object.fromEntries(months.map((month) => [month, { month, name: monthLabel(month), expense: 0, income: 0, hasData: false }]));
+
+  countedTransactions(transactions).forEach((transaction) => {
+    const transactionMonth = monthKey(transaction.date);
+    const row = rows[transactionMonth];
+    if (!row) return;
+    row.hasData = true;
+    if (transaction.kind === "expense") {
+      row.expense += transaction.amount;
+    } else if (transaction.kind === "income") {
+      row.income += transaction.amount;
+    }
+  });
+
+  return months.map((month) => {
+    const row = rows[month];
+    return {
+      ...row,
+      income: row.hasData ? row.income + recurringIncome : 0,
+    };
+  });
+}
+
+export function categoryLeakageForMonth(transactions, selectedMonth) {
+  const totals = countedTransactions(transactions)
+    .filter((transaction) => transaction.kind === "expense" && monthKey(transaction.date) === selectedMonth)
+    .reduce((acc, item) => {
+      acc[item.category] = (acc[item.category] || 0) + item.amount;
+      return acc;
+    }, {});
+  return Object.entries(totals)
+    .map(([name, value]) => ({ name, value }))
+    .sort((first, second) => second.value - first.value);
 }
 
 export function normalizeTransactionForm(formData) {
@@ -294,15 +351,77 @@ export function parseStatementCsv(text, statementType = "bank") {
 
 export function normalizeLoanForm(formData) {
   const next = Object.fromEntries(formData.entries());
+  const accountType = next.accountType || "loan";
+  const trackCardEmis = Boolean(next.trackCardEmis);
+  const creditLimit = Number(next.creditLimit || next.principal || 0);
+  const cardOutstanding = Number(next.cardOutstanding || next.outstanding || 0);
+  const explicitEmiPlan = accountType === "credit-card" && trackCardEmis && (next.emiPlanName || next.emiPurchased || next.emiLoanedAmount || next.emiCurrentOutstanding)
+    ? [{
+      name: String(next.emiPlanName || "Converted EMI").trim(),
+      purchased: String(next.emiPurchased || "").trim(),
+      loanedAmount: Number(next.emiLoanedAmount || 0),
+      outstanding: Number(next.emiCurrentOutstanding || 0),
+      monthlyEmi: Number(next.emiPlanMonthlyEmi || 0),
+      apr: Number(next.emiPlanApr || next.rate || 0),
+      roi: Number(next.emiPlanRoi || 0),
+      totalEmis: Number(next.emiPlanTotalEmis || 0),
+      completedEmis: Number(next.emiPlanCompletedEmis || 0),
+    }]
+    : [];
+  const parsedEmiPlans = accountType === "credit-card" && trackCardEmis ? parseCardEmiPlans(next.emiPlans || "") : [];
+  const emiPlans = explicitEmiPlan.length ? explicitEmiPlan : parsedEmiPlans;
+  const monthlyEmi = emiPlans.length ? emiPlans.reduce((sum, plan) => sum + Number(plan.monthlyEmi || 0), 0) : Number(next.monthlyEmi || next.emi || 0);
+  const emiOutstanding = trackCardEmis && emiPlans?.length
+    ? emiPlans.reduce((sum, plan) => sum + plan.outstanding, 0)
+    : trackCardEmis ? Number(next.emiOutstanding || 0) : 0;
   return {
+    accountType,
     lender: next.lender.trim(),
-    principal: Number(next.principal),
-    outstanding: Number(next.outstanding),
-    emi: Number(next.emi),
+    principal: accountType === "credit-card" ? creditLimit : Number(next.principal),
+    outstanding: accountType === "credit-card" ? cardOutstanding : Number(next.outstanding),
+    emi: accountType === "credit-card" ? (trackCardEmis ? monthlyEmi : 0) : Number(next.emi),
     dueDay: Number(next.dueDay),
     rate: Number(next.rate),
+    tenureMonths: accountType === "credit-card" ? null : Number(next.tenureMonths || 0),
+    periodsPaid: accountType === "credit-card" ? null : Number(next.periodsPaid || 0),
+    creditLimit: accountType === "credit-card" ? creditLimit : null,
+    cardOutstanding: accountType === "credit-card" ? cardOutstanding : null,
+    emiOutstanding: accountType === "credit-card" ? emiOutstanding : null,
+    monthlyEmi: accountType === "credit-card" ? (trackCardEmis ? (monthlyEmi || emiPlans?.reduce((sum, plan) => sum + plan.monthlyEmi, 0) || 0) : 0) : null,
+    minimumDue: accountType === "credit-card" ? Number(next.minimumDue || 0) : null,
+    emiPlans,
     schedule: [],
   };
+}
+
+export function parseCardEmiPlans(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^loan\s*name/i.test(line) && !/^name\s*,/i.test(line))
+    .map((line) => {
+      const cells = splitCsvLine(line);
+      const [name = "", purchased = "", third = "", fourth = "", fifth = "", sixth = "", seventh = "", eighth = "", ninth = ""] = cells;
+      const legacyRow = cells.length <= 5;
+      const loanedAmount = legacyRow ? Number(third) : Number(third);
+      const outstanding = legacyRow ? Number(third) : Number(fourth);
+      const monthlyEmi = legacyRow ? Number(fourth) : Number(fifth);
+      const totalEmis = legacyRow ? Number(fifth) : Number(sixth);
+      const completedEmis = legacyRow || !Number.isFinite(Number(seventh)) ? Math.max(0, totalEmis - (outstanding && monthlyEmi ? Math.ceil(outstanding / monthlyEmi) : 0)) : Number(seventh);
+      return {
+        name: name.trim(),
+        purchased: purchased.trim(),
+        loanedAmount,
+        outstanding,
+        monthlyEmi,
+        apr: Number(eighth || 0),
+        roi: Number(ninth || 0),
+        totalEmis,
+        completedEmis,
+      };
+    })
+    .filter((plan) => plan.name && Number.isFinite(plan.outstanding) && Number.isFinite(plan.monthlyEmi));
 }
 
 export function parseRepaymentSchedule(text) {
@@ -336,7 +455,13 @@ export function currentMonthPaymentStatus(loan, anchorDate = referenceDate) {
 }
 
 export function loanIncomeImpact(loans, commitments, salary) {
-  const emi = loans.reduce((sum, item) => sum + item.emi, 0);
+  const emi = loans.reduce((sum, item) => {
+    if (item.accountType !== "credit-card") {
+      return sum + Number(item.emi || 0);
+    }
+    const planMonthlyEmi = (item.emiPlans || []).reduce((planSum, plan) => planSum + Number(plan.monthlyEmi || 0), 0);
+    return sum + (planMonthlyEmi || Number(item.monthlyEmi || 0));
+  }, 0);
   const recurring = commitments.reduce((sum, item) => sum + item.amount, 0);
   const committed = emi + recurring;
   return {
@@ -394,24 +519,42 @@ function transactionToApi(transaction) {
 function loanFromApi(loan) {
   return {
     id: loan.id,
+    accountType: loan.account_type || "loan",
     lender: loan.lender,
     principal: loan.principal,
     outstanding: loan.outstanding,
     emi: loan.emi,
     dueDay: loan.due_day,
     rate: loan.interest_rate,
+    tenureMonths: loan.tenure_months ?? null,
+    periodsPaid: loan.periods_paid ?? null,
+    creditLimit: loan.credit_limit ?? null,
+    cardOutstanding: loan.card_outstanding ?? null,
+    emiOutstanding: loan.emi_outstanding ?? null,
+    monthlyEmi: loan.monthly_emi ?? null,
+    minimumDue: loan.minimum_due ?? null,
+    emiPlans: loan.emi_plans || [],
     schedule: [],
   };
 }
 
 function loanToApi(loan) {
   return {
+    account_type: loan.accountType || "loan",
     lender: loan.lender,
     principal: loan.principal,
     outstanding: loan.outstanding,
     emi: loan.emi,
     due_day: loan.dueDay,
     interest_rate: loan.rate,
+    tenure_months: loan.tenureMonths,
+    periods_paid: loan.periodsPaid,
+    credit_limit: loan.creditLimit,
+    card_outstanding: loan.cardOutstanding,
+    emi_outstanding: loan.emiOutstanding,
+    monthly_emi: loan.monthlyEmi,
+    minimum_due: loan.minimumDue,
+    emi_plans: loan.emiPlans,
   };
 }
 
@@ -630,6 +773,7 @@ export function App({ initialToken, initialUser, skipInitialLoad = false } = {})
     return {
       expense,
       income,
+      recurringIncome: salary + incomeSourceTotal,
       emi,
       net: income - expense - emi,
       categoryData: Object.entries(categoryTotals).map(([name, value]) => ({ name, value })),
@@ -715,8 +859,28 @@ export function App({ initialToken, initialUser, skipInitialLoad = false } = {})
     setCommitments((items) => [{ id: Date.now(), ...commitment }, ...items]);
   }
 
+  function updateCommitment(commitmentId, commitment) {
+    setCommitments((items) => items.map((item) => (item.id === commitmentId ? { ...item, ...commitment } : item)));
+  }
+
   function deleteCommitment(commitmentId) {
     setCommitments((items) => items.filter((item) => item.id !== commitmentId));
+  }
+
+  async function logCommitment(commitment) {
+    const dueDay = String(Math.min(28, Math.max(1, Number(commitment.dueDay || 1)))).padStart(2, "0");
+    await addTransaction({
+      kind: "expense",
+      category: commitment.category || "Commitments",
+      group: "Monthly Commitments",
+      merchant: commitment.name,
+      alias: "",
+      amount: Number(commitment.amount),
+      date: `${monthKey(referenceDate)}-${dueDay}`,
+      source: "Commitment",
+      excludedFromTotals: true,
+      notes: "Monthly commitment logged from profile settings.",
+    });
   }
 
   function addChatExpense() {
@@ -816,10 +980,10 @@ export function App({ initialToken, initialUser, skipInitialLoad = false } = {})
             {active === "Dashboard" && <Dashboard metrics={metrics} transactions={transactions} loans={loans} theme={currentTheme} />}
             {active === "Transaction Log" && <TransactionLog transactions={transactions} onAdd={addTransaction} onUpdate={updateTransaction} onDelete={deleteTransaction} view={view} setView={setView} theme={currentTheme} />}
             {active === "Calendar" && <CalendarView transactions={transactions} theme={currentTheme} />}
-            {active === "Loans" && <Loans loans={loans} metrics={metrics} salary={profileIncomeTotal} commitments={commitments} onAdd={addLoan} onUpdate={updateLoan} onDelete={deleteLoan} onScheduleUpload={uploadLoanSchedule} onAddCommitment={addCommitment} onDeleteCommitment={deleteCommitment} theme={currentTheme} />}
+            {active === "Loans" && <Loans loans={loans} metrics={metrics} salary={profileIncomeTotal} commitments={commitments} onAdd={addLoan} onUpdate={updateLoan} onDelete={deleteLoan} onScheduleUpload={uploadLoanSchedule} theme={currentTheme} />}
             {active === "AI Chat" && <AIChat chats={chats} setChats={setChats} chatInput={chatInput} setChatInput={setChatInput} sendChat={sendChat} addChatExpense={addChatExpense} aiDraftExpense={aiDraftExpense} theme={currentTheme} />}
             {active === "Graph Builder" && <GraphBuilder data={metrics.categoryData} transactions={transactions} theme={currentTheme} />}
-            {active === "Profile Settings" && <ProfileSettings user={user} dark={dark} setDark={setDark} theme={theme} setTheme={setTheme} salary={salary} incomeSources={incomeSources} onAddIncomeSource={addIncomeSource} onDeleteIncomeSource={deleteIncomeSource} profileImage={profileImage} setProfileImage={setProfileImage} />}
+            {active === "Profile Settings" && <ProfileSettings user={user} dark={dark} setDark={setDark} theme={theme} setTheme={setTheme} salary={salary} incomeSources={incomeSources} onAddIncomeSource={addIncomeSource} onDeleteIncomeSource={deleteIncomeSource} commitments={commitments} onAddCommitment={addCommitment} onUpdateCommitment={updateCommitment} onDeleteCommitment={deleteCommitment} onLogCommitment={logCommitment} profileImage={profileImage} setProfileImage={setProfileImage} />}
           </div>
         </section>
       </div>
@@ -1006,13 +1170,15 @@ function IconButton({ icon: Icon, label, onClick }) {
 }
 
 function Dashboard({ metrics, transactions, loans, theme }) {
-  const trend = [
-    { month: "Feb", expense: 2200, income: 6900 },
-    { month: "Mar", expense: 2480, income: 7100 },
-    { month: "Apr", expense: 3010, income: 7200 },
-    { month: "May", expense: 2760, income: 7200 },
-    { month: "Jun", expense: metrics.expense, income: metrics.income },
-  ];
+  const monthOptions = transactionMonthOptions(transactions);
+  const [selectedMonth, setSelectedMonth] = useState(monthOptions[0]);
+  useEffect(() => {
+    if (!monthOptions.includes(selectedMonth)) {
+      setSelectedMonth(monthOptions[0]);
+    }
+  }, [monthOptions, selectedMonth]);
+  const monthlyComparison = monthlyComparisonData(transactions, monthOptions[0], metrics.recurringIncome);
+  const leakageData = categoryLeakageForMonth(transactions, selectedMonth);
   const expenseGroups = Object.values(transactions
     .filter((transaction) => transaction.kind === "expense" && transaction.group && !transaction.excludedFromTotals)
     .reduce((groups, transaction) => {
@@ -1033,30 +1199,35 @@ function Dashboard({ metrics, transactions, loans, theme }) {
       </div>
       <div className="grid grid-cols-[1.5fr_1fr] gap-5 max-xl:grid-cols-1">
         <Panel title="Monthly Comparison">
-          <div data-testid="monthly-comparison-chart" data-chart-color={theme.chart} data-chart-alt-color={theme.chartAlt}>
+          <div data-testid="monthly-comparison-chart" data-income-color={incomeChartColor} data-expense-color={expenseChartColor}>
             <ResponsiveContainer width="100%" height={290}>
-              <AreaChart data={trend}>
-                <defs>
-                  <linearGradient id="monthly-comparison-income" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={theme.chart} stopOpacity={0.3} /><stop offset="95%" stopColor={theme.chart} stopOpacity={0} /></linearGradient>
-                </defs>
+              <BarChart data={monthlyComparison}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                <XAxis dataKey="month" />
-                <YAxis />
-                <Tooltip />
-                <Area dataKey="income" stroke={theme.chart} fill="url(#monthly-comparison-income)" />
-                <Line dataKey="expense" stroke={theme.chartAlt} strokeWidth={3} />
-              </AreaChart>
+                <XAxis dataKey="name" />
+                <YAxis tickFormatter={chartMoney} />
+                <Tooltip formatter={(value, name) => [chartMoney(value), name]} />
+                <Bar dataKey="expense" name="Expense" fill={expenseChartColor} radius={[8, 8, 0, 0]} />
+                <Bar dataKey="income" name="Income" fill={incomeChartColor} radius={[8, 8, 0, 0]} />
+              </BarChart>
             </ResponsiveContainer>
           </div>
         </Panel>
-        <Panel title="Money Leakage">
+        <Panel
+          title="Money Leakage"
+          action={
+            <select value={selectedMonth} onChange={(event) => setSelectedMonth(event.target.value)} className="rounded-lg bg-slate-100 px-3 py-2 text-sm dark:bg-slate-800" aria-label="Leakage month">
+              {monthOptions.map((month) => <option key={month} value={month}>{monthLabel(month)}</option>)}
+            </select>
+          }
+        >
           <div className="space-y-4">
-            {metrics.categoryData.slice(0, 5).map((item) => (
+            {leakageData.slice(0, 5).map((item) => (
               <div key={item.name}>
                 <div className="mb-1 flex justify-between text-sm"><span>{item.name}</span><span>{money(item.value)}</span></div>
-                <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-800"><div className={`h-2 rounded-full ${theme.bar}`} style={{ width: `${Math.min(100, item.value / 18)}%` }} /></div>
+                <div className="h-2 rounded-full bg-slate-200 dark:bg-slate-800"><div className={`h-2 rounded-full ${theme.bar}`} style={{ width: `${Math.min(100, (item.value / Math.max(leakageData[0]?.value || 1, 1)) * 100)}%` }} /></div>
               </div>
             ))}
+            {!leakageData.length && <p className="text-sm text-slate-500 dark:text-slate-400">No leakage recorded for {monthLabel(selectedMonth)}.</p>}
           </div>
         </Panel>
       </div>
@@ -1831,12 +2002,31 @@ function CalendarView({ transactions, theme }) {
 }
 
 const emptyLoanForm = {
+  accountType: "loan",
   lender: "",
   principal: "",
   outstanding: "",
   emi: "",
   dueDay: "1",
   rate: "",
+  tenureMonths: "",
+  periodsPaid: "",
+  creditLimit: "",
+  cardOutstanding: "",
+  emiOutstanding: "",
+  monthlyEmi: "",
+  minimumDue: "",
+  emiPlans: "",
+  trackCardEmis: false,
+  emiPlanName: "",
+  emiPurchased: "",
+  emiLoanedAmount: "",
+  emiCurrentOutstanding: "",
+  emiPlanMonthlyEmi: "",
+  emiPlanApr: "",
+  emiPlanRoi: "",
+  emiPlanTotalEmis: "",
+  emiPlanCompletedEmis: "",
 };
 
 const emptyCommitmentForm = {
@@ -1846,20 +2036,28 @@ const emptyCommitmentForm = {
   category: "Bills",
 };
 
-function Loans({ loans, salary, commitments, onAdd, onUpdate, onDelete, onScheduleUpload, onAddCommitment, onDeleteCommitment, theme }) {
+function Loans({ loans, salary, commitments, onAdd, onUpdate, onDelete, onScheduleUpload, theme }) {
   const [loanForm, setLoanForm] = useState(emptyLoanForm);
   const [editingId, setEditingId] = useState(null);
-  const [commitmentForm, setCommitmentForm] = useState(emptyCommitmentForm);
+  const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
   const impact = loanIncomeImpact(loans, commitments, salary);
 
   function updateLoanField(event) {
-    setLoanForm((current) => ({ ...current, [event.target.name]: event.target.value }));
+    const { name, type, checked, value } = event.target;
+    setLoanForm((current) => {
+      const next = { ...current, [name]: type === "checkbox" ? checked : value };
+      if (name === "accountType" && value === "loan") {
+        next.trackCardEmis = false;
+      }
+      return next;
+    });
   }
 
   function submitLoan(event) {
     event.preventDefault();
     const loan = normalizeLoanForm(new FormData(event.currentTarget));
-    if (!loan.lender || !loan.principal || !loan.outstanding || !loan.emi || !loan.dueDay) {
+    const isCreditCard = loan.accountType === "credit-card";
+    if (!loan.lender || !loan.dueDay || (isCreditCard ? (!loan.creditLimit || !loan.cardOutstanding) : (!loan.principal || !loan.outstanding || !loan.emi))) {
       return;
     }
     if (editingId) {
@@ -1869,23 +2067,53 @@ function Loans({ loans, salary, commitments, onAdd, onUpdate, onDelete, onSchedu
     }
     setEditingId(null);
     setLoanForm(emptyLoanForm);
+    setIsAccountModalOpen(false);
+  }
+
+  function openAddAccount() {
+    setEditingId(null);
+    setLoanForm(emptyLoanForm);
+    setIsAccountModalOpen(true);
   }
 
   function editLoan(loan) {
     setEditingId(loan.id);
+    const firstPlan = loan.emiPlans?.[0] || {};
+    const emiPlansText = (loan.emiPlans || []).map((plan) => [plan.name, plan.purchased, plan.loanedAmount ?? plan.outstanding, plan.outstanding, plan.monthlyEmi, plan.totalEmis || "", plan.completedEmis || ""].join(",")).join("\n");
     setLoanForm({
+      accountType: loan.accountType || "loan",
       lender: loan.lender,
       principal: String(loan.principal),
       outstanding: String(loan.outstanding),
       emi: String(loan.emi),
       dueDay: String(loan.dueDay),
       rate: String(loan.rate),
+      tenureMonths: String(loan.tenureMonths ?? ""),
+      periodsPaid: String(loan.periodsPaid ?? ""),
+      creditLimit: String(loan.creditLimit ?? loan.principal ?? ""),
+      cardOutstanding: String(loan.cardOutstanding ?? loan.outstanding ?? ""),
+      emiOutstanding: String(loan.emiOutstanding ?? ""),
+      monthlyEmi: String(loan.monthlyEmi ?? loan.emi ?? ""),
+      minimumDue: String(loan.minimumDue ?? ""),
+      emiPlans: emiPlansText,
+      trackCardEmis: Boolean(emiPlansText || loan.emiOutstanding || loan.monthlyEmi),
+      emiPlanName: firstPlan.name || "",
+      emiPurchased: firstPlan.purchased || "",
+      emiLoanedAmount: String(firstPlan.loanedAmount ?? ""),
+      emiCurrentOutstanding: String(firstPlan.outstanding ?? loan.emiOutstanding ?? ""),
+      emiPlanMonthlyEmi: String(firstPlan.monthlyEmi ?? loan.monthlyEmi ?? ""),
+      emiPlanApr: String(firstPlan.apr ?? ""),
+      emiPlanRoi: String(firstPlan.roi ?? ""),
+      emiPlanTotalEmis: String(firstPlan.totalEmis ?? ""),
+      emiPlanCompletedEmis: String(firstPlan.completedEmis ?? ""),
     });
+    setIsAccountModalOpen(true);
   }
 
   function cancelLoanEdit() {
     setEditingId(null);
     setLoanForm(emptyLoanForm);
+    setIsAccountModalOpen(false);
   }
 
   async function uploadSchedule(event, loanId) {
@@ -1896,55 +2124,99 @@ function Loans({ loans, salary, commitments, onAdd, onUpdate, onDelete, onSchedu
     event.target.value = "";
   }
 
-  function updateCommitmentField(event) {
-    setCommitmentForm((current) => ({ ...current, [event.target.name]: event.target.value }));
-  }
-
-  function submitCommitment(event) {
-    event.preventDefault();
-    const formData = new FormData(event.currentTarget);
-    const commitment = {
-      name: formData.get("name").trim(),
-      amount: Number(formData.get("amount")),
-      dueDay: Number(formData.get("dueDay")),
-      category: formData.get("category").trim() || "Bills",
-    };
-    if (!commitment.name || !commitment.amount || !commitment.dueDay) {
-      return;
-    }
-    onAddCommitment(commitment);
-    setCommitmentForm(emptyCommitmentForm);
-  }
-
   return (
     <div className="grid grid-cols-[1fr_320px] gap-5 max-xl:grid-cols-1">
       <div className="space-y-5">
-        <Panel
-          title={editingId ? "Edit Loan" : "Add Loan"}
-          action={
-            <div className="flex gap-2">
-              {editingId && <button onClick={cancelLoanEdit} className="rounded-lg border border-slate-200 px-4 py-2 text-sm dark:border-slate-700">Cancel</button>}
-              <button type="submit" form="loan-form" className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white ${theme.button}`}>
-                {editingId ? <Save size={16} /> : <Plus size={16} />} {editingId ? "Save" : "Add Loan"}
-              </button>
+        {isAccountModalOpen && (
+          <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 p-4">
+            <div className="max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-lg border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-800 dark:bg-slate-900">
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <h3 className="text-lg font-semibold">{editingId ? "Edit Account" : "Add Account"}</h3>
+                <button onClick={cancelLoanEdit} className="rounded-lg border border-slate-200 px-4 py-2 text-sm dark:border-slate-700">Cancel</button>
+              </div>
+              <form id="loan-form" onSubmit={submitLoan} className="grid grid-cols-3 gap-4 max-md:grid-cols-1">
+                <label className="label">Account type<select name="accountType" value={loanForm.accountType} onChange={updateLoanField} className="input mt-1 w-full" aria-label="Account type"><option value="loan">Loan</option><option value="credit-card">Credit Card</option></select></label>
+                {loanForm.accountType === "credit-card" ? (
+                  <>
+                    <label className="label">Card name<input name="lender" value={loanForm.lender} onChange={updateLoanField} className="input mt-1 w-full" placeholder="HDFC Regalia" required /></label>
+                    <label className="label">Credit limit<input name="creditLimit" value={loanForm.creditLimit} onChange={updateLoanField} type="number" min="0" step="0.01" className="input mt-1 w-full" placeholder="100000" required /></label>
+                    <label className="label">Total outstanding<input name="cardOutstanding" value={loanForm.cardOutstanding} onChange={updateLoanField} type="number" min="0" step="0.01" className="input mt-1 w-full" placeholder="93000" required /></label>
+                    <label className="label">Minimum due<input name="minimumDue" value={loanForm.minimumDue} onChange={updateLoanField} type="number" min="0" step="0.01" className="input mt-1 w-full" placeholder="12000" /></label>
+                    <label className="label">Card due day<input name="dueDay" value={loanForm.dueDay} onChange={updateLoanField} type="number" min="1" max="31" className="input mt-1 w-full" placeholder="12" required /></label>
+                    <label className="label">APR %<input name="rate" value={loanForm.rate} onChange={updateLoanField} type="number" min="0" step="0.01" className="input mt-1 w-full" placeholder="36" /></label>
+                    <label className="col-span-full inline-flex items-center gap-3 rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-700">
+                      <input name="trackCardEmis" type="checkbox" checked={loanForm.trackCardEmis} onChange={updateLoanField} />
+                      Track converted-to-EMI purchases
+                    </label>
+                    {loanForm.trackCardEmis && (
+                      <>
+                        <label className="label">EMI loan name<input name="emiPlanName" value={loanForm.emiPlanName} onChange={updateLoanField} className="input mt-1 w-full" placeholder="Phone EMI" /></label>
+                        <label className="label">Purchased item<input name="emiPurchased" value={loanForm.emiPurchased} onChange={updateLoanField} className="input mt-1 w-full" placeholder="iPhone" /></label>
+                        <label className="label">Converted amount<input name="emiLoanedAmount" value={loanForm.emiLoanedAmount} onChange={updateLoanField} type="number" min="0" step="0.01" className="input mt-1 w-full" placeholder="90000" /></label>
+                        <label className="label">Current outstanding after EMIs<input name="emiCurrentOutstanding" value={loanForm.emiCurrentOutstanding} onChange={updateLoanField} type="number" min="0" step="0.01" className="input mt-1 w-full" placeholder="50000" /></label>
+                        <label className="label">Monthly EMI<input name="emiPlanMonthlyEmi" value={loanForm.emiPlanMonthlyEmi} onChange={updateLoanField} type="number" min="0" step="0.01" className="input mt-1 w-full" placeholder="7000" /></label>
+                        <label className="label">APR %<input name="emiPlanApr" value={loanForm.emiPlanApr} onChange={updateLoanField} type="number" min="0" step="0.01" className="input mt-1 w-full" placeholder="36" /></label>
+                        <label className="label">ROI %<input name="emiPlanRoi" value={loanForm.emiPlanRoi} onChange={updateLoanField} type="number" min="0" step="0.01" className="input mt-1 w-full" placeholder="14" /></label>
+                        <label className="label">Total EMIs<input name="emiPlanTotalEmis" value={loanForm.emiPlanTotalEmis} onChange={updateLoanField} type="number" min="0" step="1" className="input mt-1 w-full" placeholder="12" /></label>
+                        <label className="label">EMIs completed<input name="emiPlanCompletedEmis" value={loanForm.emiPlanCompletedEmis} onChange={updateLoanField} type="number" min="0" step="1" className="input mt-1 w-full" placeholder="5" /></label>
+                        <div className="col-span-full rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+                          <div className="mb-2 flex justify-between text-sm">
+                            <span>Outstanding split preview</span>
+                            <span>{money(Math.max(0, Number(loanForm.cardOutstanding || 0) - Number(loanForm.emiCurrentOutstanding || 0)))} regular · {money(Number(loanForm.emiCurrentOutstanding || 0))} EMI</span>
+                          </div>
+                          <div className="flex h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                            <div className="h-2 bg-rose-500" style={{ width: `${Number(loanForm.creditLimit || 0) ? Math.min(100, (Math.max(0, Number(loanForm.cardOutstanding || 0) - Number(loanForm.emiCurrentOutstanding || 0)) / Number(loanForm.creditLimit || 1)) * 100) : 0}%` }} />
+                            <div className="h-2 bg-amber-400" style={{ width: `${Number(loanForm.creditLimit || 0) ? Math.min(100, (Number(loanForm.emiCurrentOutstanding || 0) / Number(loanForm.creditLimit || 1)) * 100) : 0}%` }} />
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <label className="label">Lender<input name="lender" value={loanForm.lender} onChange={updateLoanField} className="input mt-1 w-full" placeholder="Personal Loan" required /></label>
+                    <label className="label">Principal<input name="principal" value={loanForm.principal} onChange={updateLoanField} type="number" min="0" step="0.01" className="input mt-1 w-full" placeholder="100000" required /></label>
+                    <label className="label">Outstanding<input name="outstanding" value={loanForm.outstanding} onChange={updateLoanField} type="number" min="0" step="0.01" className="input mt-1 w-full" placeholder="80000" required /></label>
+                    <label className="label">EMI<input name="emi" value={loanForm.emi} onChange={updateLoanField} type="number" min="0" step="0.01" className="input mt-1 w-full" placeholder="5000" required /></label>
+                    <label className="label">Tenure / periods<input name="tenureMonths" value={loanForm.tenureMonths} onChange={updateLoanField} type="number" min="1" step="1" className="input mt-1 w-full" placeholder="60" /></label>
+                    <label className="label">Periods paid<input name="periodsPaid" value={loanForm.periodsPaid} onChange={updateLoanField} type="number" min="0" step="1" className="input mt-1 w-full" placeholder="12" /></label>
+                    <label className="label">Loan due day<input name="dueDay" value={loanForm.dueDay} onChange={updateLoanField} type="number" min="1" max="31" className="input mt-1 w-full" placeholder="15" required /></label>
+                    <label className="label">ROI %<input name="rate" value={loanForm.rate} onChange={updateLoanField} type="number" min="0" step="0.01" className="input mt-1 w-full" placeholder="11.5" /></label>
+                  </>
+                )}
+                <div className="col-span-full flex justify-end gap-2">
+                  <button type="button" onClick={cancelLoanEdit} className="rounded-lg border border-slate-200 px-4 py-2 text-sm dark:border-slate-700">Cancel</button>
+                  <button type="submit" className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white ${theme.button}`}>{editingId ? <Save size={16} /> : <Plus size={16} />} {editingId ? "Save" : "Add Account"}</button>
+                </div>
+              </form>
             </div>
-          }
-        >
-          <form id="loan-form" onSubmit={submitLoan} className="grid grid-cols-6 gap-3 max-xl:grid-cols-3 max-md:grid-cols-1">
-            <input name="lender" value={loanForm.lender} onChange={updateLoanField} className="input" placeholder="Lender" required />
-            <input name="principal" value={loanForm.principal} onChange={updateLoanField} type="number" min="0" step="0.01" className="input" placeholder="Principal" required />
-            <input name="outstanding" value={loanForm.outstanding} onChange={updateLoanField} type="number" min="0" step="0.01" className="input" placeholder="Outstanding" required />
-            <input name="emi" value={loanForm.emi} onChange={updateLoanField} type="number" min="0" step="0.01" className="input" placeholder="EMI" required />
-            <input name="dueDay" value={loanForm.dueDay} onChange={updateLoanField} type="number" min="1" max="31" className="input" placeholder="Loan due day" required />
-            <input name="rate" value={loanForm.rate} onChange={updateLoanField} type="number" min="0" step="0.01" className="input" placeholder="ROI %" />
-          </form>
-        </Panel>
+          </div>
+        )}
 
-        <Panel title="Loan Accounts">
+        <Panel title="Loan Accounts" action={<button onClick={openAddAccount} className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white ${theme.button}`}><Plus size={16} /> New Account</button>}>
           <div className="space-y-3">
             {loans.map((loan) => {
               const status = currentMonthPaymentStatus(loan);
-              const paidRatio = Math.min(100, Math.max(0, 100 - (loan.outstanding / loan.principal) * 100));
+              const isCreditCard = loan.accountType === "credit-card";
+              const creditLimit = Number(loan.creditLimit ?? loan.principal ?? 0);
+              const cardOutstanding = Number(loan.cardOutstanding ?? loan.outstanding ?? 0);
+              const emiPlans = loan.emiPlans || [];
+              const planEmiOutstanding = emiPlans.reduce((sum, plan) => sum + Number(plan.outstanding || 0), 0);
+              const planMonthlyEmi = emiPlans.reduce((sum, plan) => sum + Number(plan.monthlyEmi || 0), 0);
+              const emiOutstanding = planEmiOutstanding || Number(loan.emiOutstanding || 0);
+              const regularOutstanding = Math.max(0, cardOutstanding - emiOutstanding);
+              const monthlyEmi = planMonthlyEmi || Number(loan.monthlyEmi || 0);
+              const minimumDue = Number(loan.minimumDue || 0);
+              const regularRatio = creditLimit ? Math.min(100, (regularOutstanding / creditLimit) * 100) : 0;
+              const emiRatio = creditLimit ? Math.min(100, (emiOutstanding / creditLimit) * 100) : 0;
+              const paidRatio = isCreditCard
+                ? Math.min(100, Math.max(0, creditLimit ? (cardOutstanding / creditLimit) * 100 : 0))
+                : Math.min(100, Math.max(0, 100 - (loan.outstanding / loan.principal) * 100));
+              const tenureMonths = Number(loan.tenureMonths || 0);
+              const basePeriodsPaid = Number(loan.periodsPaid || 0);
+              const currentMonthPaid = !isCreditCard && status.payment?.paidDate ? 1 : 0;
+              const completedPeriods = tenureMonths ? Math.min(tenureMonths, basePeriodsPaid + currentMonthPaid) : basePeriodsPaid;
+              const remainingPeriods = tenureMonths ? Math.max(0, tenureMonths - completedPeriods) : null;
               const statusColor = {
                 emerald: "bg-emerald-100 text-emerald-700",
                 amber: "bg-amber-100 text-amber-700",
@@ -1956,7 +2228,7 @@ function Loans({ loans, salary, commitments, onAdd, onUpdate, onDelete, onSchedu
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <h3 className="font-semibold">{loan.lender}</h3>
-                      <p className="text-sm text-slate-500 dark:text-slate-400">ROI {loan.rate}% · Due day {loan.dueDay}</p>
+                      <p className="text-sm text-slate-500 dark:text-slate-400">{isCreditCard ? "Credit Card" : "Loan"} · {isCreditCard ? "APR" : "ROI"} {loan.rate}% · Due day {loan.dueDay}</p>
                     </div>
                     <div className="flex gap-2">
                       <button onClick={() => editLoan(loan)} className="grid h-9 w-9 place-items-center rounded-lg border border-slate-200 dark:border-slate-700" aria-label={`Edit ${loan.lender}`} title="Edit">
@@ -1967,54 +2239,86 @@ function Loans({ loans, salary, commitments, onAdd, onUpdate, onDelete, onSchedu
                       </button>
                     </div>
                   </div>
-                  <div className="mt-3 h-2 rounded-full bg-slate-200 dark:bg-slate-800"><div className="h-2 rounded-full bg-sky-500" style={{ width: `${paidRatio}%` }} /></div>
-                  <div className="mt-3 grid grid-cols-4 gap-3 text-sm max-lg:grid-cols-2">
-                    <span>Principal {money(loan.principal)}</span>
-                    <span>Outstanding {money(loan.outstanding)}</span>
-                    <span>EMI {money(loan.emi)}</span>
-                    <span>After current EMI {money(status.projectedOutstanding)}</span>
+                  <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                    {isCreditCard ? (
+                      <div className="flex h-2">
+                        <div className="h-2 bg-rose-500" style={{ width: `${regularRatio}%` }} />
+                        <div className="h-2 bg-amber-400" style={{ width: `${emiRatio}%` }} />
+                      </div>
+                    ) : (
+                      <div className="h-2 rounded-full bg-sky-500" style={{ width: `${paidRatio}%` }} />
+                    )}
                   </div>
-                  <div className="mt-4 flex flex-wrap items-center gap-3">
-                    <span className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium ${statusColor}`}>
-                      {status.tone === "emerald" ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
-                      {status.label}
-                    </span>
-                    {status.payment && <span className="text-sm text-slate-500 dark:text-slate-400">Due {status.payment.dueDate} · Paid {status.payment.paidDate || "not paid"} · {money(status.payment.amount)}</span>}
-                    <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-700" title="Upload CSV with dueDate, amount, paidDate columns">
-                      <Upload size={16} /> Upload schedule
-                      <input type="file" accept=".csv,text/csv,text/plain" className="hidden" aria-label={`Upload repayment schedule for ${loan.lender}`} onChange={(event) => uploadSchedule(event, loan.id)} />
-                    </label>
-                  </div>
+                  {isCreditCard ? (
+                    <>
+                      <div className="mt-3 flex flex-wrap gap-3 text-xs text-slate-500 dark:text-slate-400">
+                        <span className="inline-flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full bg-rose-500" /> Regular outstanding</span>
+                        <span className="inline-flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full bg-amber-400" /> Converted to EMI</span>
+                      </div>
+                      <div className="mt-3 grid grid-cols-3 gap-3 text-sm max-lg:grid-cols-2">
+                        <span>Credit limit {money(creditLimit)}</span>
+                        <span>Total outstanding {money(cardOutstanding)}</span>
+                        <span>Utilization {Math.round(paidRatio)}%</span>
+                        <span>Regular outstanding {money(regularOutstanding)}</span>
+                        <span>EMI outstanding {money(emiOutstanding)}</span>
+                        <span>Monthly EMI {monthlyEmi ? money(monthlyEmi) : "None"}</span>
+                        <span>Minimum due {minimumDue ? money(minimumDue) : "Not set"}</span>
+                      </div>
+                      <div className="mt-4 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-800">
+                        <div className="grid grid-cols-[1.2fr_1.2fr_1fr_1fr_1fr_0.8fr_0.8fr] gap-3 bg-slate-100 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                          <span>Loan name</span>
+                          <span>Purchased</span>
+                          <span>Total loaned</span>
+                          <span>Outstanding</span>
+                          <span>Monthly EMI</span>
+                          <span>Rate</span>
+                          <span>Completed</span>
+                        </div>
+                        {emiPlans.length ? emiPlans.map((plan, index) => (
+                          <div key={`${plan.name}-${index}`} className="grid grid-cols-[1.2fr_1.2fr_1fr_1fr_1fr_0.8fr_0.8fr] gap-3 border-t border-slate-100 px-3 py-2 text-sm dark:border-slate-800">
+                            <span className="font-medium">{plan.name}</span>
+                            <span>{plan.purchased || "Not specified"}</span>
+                            <span>{money(plan.loanedAmount ?? plan.outstanding)}</span>
+                            <span>{money(plan.outstanding)}</span>
+                            <span>{money(plan.monthlyEmi)}</span>
+                            <span>{plan.roi ? `${plan.roi}% ROI` : plan.apr ? `${plan.apr}% APR` : "-"}</span>
+                            <span>{Number(plan.totalEmis) > 0 ? `${Number(plan.completedEmis || 0)}/${Number(plan.totalEmis)}` : "-"}</span>
+                          </div>
+                        )) : (
+                          <div className="border-t border-slate-100 px-3 py-3 text-sm text-slate-500 dark:border-slate-800 dark:text-slate-400">No credit card EMI plans recorded.</div>
+                        )}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="mt-3 grid grid-cols-3 gap-3 text-sm max-lg:grid-cols-2">
+                        <span>Principal {money(loan.principal)}</span>
+                        <span>Outstanding {money(loan.outstanding)}</span>
+                        <span>EMI {money(loan.emi)}</span>
+                        <span>Tenure {tenureMonths ? `${tenureMonths} months` : "Not set"}</span>
+                        <span>Periods {tenureMonths ? `${completedPeriods}/${tenureMonths} paid` : "Not set"}</span>
+                        <span>Remaining {remainingPeriods !== null ? `${remainingPeriods} months` : "Not set"}</span>
+                        <span>After current EMI {money(status.projectedOutstanding)}</span>
+                      </div>
+                      <div className="mt-4 flex flex-wrap items-center gap-3">
+                        <span className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium ${statusColor}`}>
+                          {status.tone === "emerald" ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
+                          {status.label}
+                        </span>
+                        {status.payment && <span className="text-sm text-slate-500 dark:text-slate-400">Due {status.payment.dueDate} · Paid {status.payment.paidDate || "not paid"} · {money(status.payment.amount)}</span>}
+                        <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-700" title="Upload CSV with dueDate, amount, paidDate columns">
+                          <Upload size={16} /> Upload schedule
+                          <input type="file" accept=".csv,text/csv,text/plain" className="hidden" aria-label={`Upload repayment schedule for ${loan.lender}`} onChange={(event) => uploadSchedule(event, loan.id)} />
+                        </label>
+                      </div>
+                    </>
+                  )}
                 </div>
               );
             })}
           </div>
         </Panel>
 
-        <Panel title="Monthly Commitments">
-          <form onSubmit={submitCommitment} className="mb-4 grid grid-cols-[1fr_140px_110px_150px_auto] gap-3 max-lg:grid-cols-2 max-sm:grid-cols-1">
-            <input name="name" value={commitmentForm.name} onChange={updateCommitmentField} className="input" placeholder="Bill or commitment" required />
-            <input name="amount" value={commitmentForm.amount} onChange={updateCommitmentField} type="number" min="0" step="0.01" className="input" placeholder="Amount" required />
-            <input name="dueDay" value={commitmentForm.dueDay} onChange={updateCommitmentField} type="number" min="1" max="31" className="input" placeholder="Commitment due day" required />
-            <input name="category" value={commitmentForm.category} onChange={updateCommitmentField} className="input" placeholder="Category" />
-            <button className={`inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white ${theme.button}`}><Plus size={16} /> Add</button>
-          </form>
-          <div className="divide-y divide-slate-100 rounded-lg border border-slate-200 dark:divide-slate-800 dark:border-slate-800">
-            {commitments.map((item) => (
-              <div key={item.id} className="grid grid-cols-[1fr_140px_110px_44px] items-center gap-3 p-3 text-sm max-sm:grid-cols-1">
-                <div>
-                  <p className="font-medium">{item.name}</p>
-                  <p className="text-slate-500 dark:text-slate-400">{item.category}</p>
-                </div>
-                <span>{money(item.amount)}</span>
-                <span>Day {item.dueDay}</span>
-                <button onClick={() => onDeleteCommitment(item.id)} className="grid h-9 w-9 place-items-center rounded-lg border border-slate-200 text-rose-600 dark:border-slate-700" aria-label={`Delete ${item.name}`} title="Delete">
-                  <Trash2 size={16} />
-                </button>
-              </div>
-            ))}
-          </div>
-        </Panel>
       </div>
 
       <Panel title="Income Impact">
@@ -2187,13 +2491,17 @@ const emptyIncomeSourceForm = {
   type: "Salary",
 };
 
-function ProfileSettings({ user, dark, setDark, theme, setTheme, salary, incomeSources, onAddIncomeSource, onDeleteIncomeSource, profileImage, setProfileImage }) {
+function ProfileSettings({ user, dark, setDark, theme, setTheme, salary, incomeSources, onAddIncomeSource, onDeleteIncomeSource, commitments, onAddCommitment, onUpdateCommitment, onDeleteCommitment, onLogCommitment, profileImage, setProfileImage }) {
   const selectedTheme = themeStyles[theme];
   const [incomeForm, setIncomeForm] = useState(emptyIncomeSourceForm);
+  const [commitmentForm, setCommitmentForm] = useState(emptyCommitmentForm);
+  const [editingCommitmentId, setEditingCommitmentId] = useState(null);
   const incomeSourcesTotal = incomeSources.reduce((sum, item) => sum + item.amount, 0);
+  const commitmentsTotal = commitments.reduce((sum, item) => sum + item.amount, 0);
   const salaryIncomeTotal = incomeSources.filter((item) => item.type === "Salary").reduce((sum, item) => sum + item.amount, 0);
   const fixedSalaryTotal = salary + salaryIncomeTotal;
   const monthlyIncomeTotal = salary + incomeSourcesTotal;
+  const incomeAfterCommitments = monthlyIncomeTotal - commitmentsTotal;
 
   function updateIncomeField(event) {
     setIncomeForm((current) => ({ ...current, [event.target.name]: event.target.value }));
@@ -2213,6 +2521,43 @@ function ProfileSettings({ user, dark, setDark, theme, setTheme, salary, incomeS
     setIncomeForm(emptyIncomeSourceForm);
   }
 
+  function updateCommitmentField(event) {
+    setCommitmentForm((current) => ({ ...current, [event.target.name]: event.target.value }));
+  }
+
+  function submitCommitment(event) {
+    event.preventDefault();
+    const commitment = {
+      name: commitmentForm.name.trim(),
+      amount: Number(commitmentForm.amount),
+      dueDay: Number(commitmentForm.dueDay),
+      category: commitmentForm.category.trim() || "Bills",
+    };
+    if (!commitment.name || !commitment.amount || !commitment.dueDay) return;
+    if (editingCommitmentId) {
+      onUpdateCommitment(editingCommitmentId, commitment);
+    } else {
+      onAddCommitment(commitment);
+    }
+    setCommitmentForm(emptyCommitmentForm);
+    setEditingCommitmentId(null);
+  }
+
+  function editCommitment(commitment) {
+    setEditingCommitmentId(commitment.id);
+    setCommitmentForm({
+      name: commitment.name,
+      amount: String(commitment.amount),
+      dueDay: String(commitment.dueDay),
+      category: commitment.category,
+    });
+  }
+
+  function cancelCommitmentEdit() {
+    setEditingCommitmentId(null);
+    setCommitmentForm(emptyCommitmentForm);
+  }
+
   return (
     <div className="grid grid-cols-[1fr_360px] gap-5 max-xl:grid-cols-1">
       <Panel title="Profile">
@@ -2226,6 +2571,14 @@ function ProfileSettings({ user, dark, setDark, theme, setTheme, salary, incomeS
           <div>
             <label className="label">Monthly income total</label>
             <div className="flex min-h-[42px] items-center rounded-lg bg-slate-100 px-3 text-sm font-semibold dark:bg-slate-800">{money(monthlyIncomeTotal)}</div>
+          </div>
+          <div>
+            <label className="label">Monthly commitment deductions</label>
+            <div className="flex min-h-[42px] items-center rounded-lg bg-slate-100 px-3 text-sm font-semibold text-amber-600 dark:bg-slate-800">{money(commitmentsTotal)}</div>
+          </div>
+          <div>
+            <label className="label">Income after commitments</label>
+            <div className={`flex min-h-[42px] items-center rounded-lg bg-slate-100 px-3 text-sm font-semibold dark:bg-slate-800 ${incomeAfterCommitments < 0 ? "text-rose-600" : "text-emerald-600"}`}>{money(incomeAfterCommitments)}</div>
           </div>
         </div>
         <div className="mt-5 flex items-center gap-4">
@@ -2280,6 +2633,59 @@ function ProfileSettings({ user, dark, setDark, theme, setTheme, salary, incomeS
             </div>
           ))}
           {!incomeSources.length && <p className="rounded-lg bg-slate-100 p-3 text-sm text-slate-500 dark:bg-slate-800 dark:text-slate-400">No additional income sources added.</p>}
+        </div>
+      </Panel>
+      <Panel title="Monthly Commitments">
+        <p className="mb-4 text-sm text-slate-500 dark:text-slate-400">Use this for recurring salary deductions that are not loans. You can log a monthly entry into transactions as excluded to keep it visible without double-counting totals.</p>
+        <form onSubmit={submitCommitment} className="space-y-3">
+          <div>
+            <label className="label">Commitment name</label>
+            <input name="name" value={commitmentForm.name} onChange={updateCommitmentField} className="input w-full" placeholder="Rent, insurance, SIP" required />
+          </div>
+          <div className="grid grid-cols-3 gap-3 max-md:grid-cols-1">
+            <div>
+              <label className="label">Commitment amount</label>
+              <input name="amount" value={commitmentForm.amount} onChange={updateCommitmentField} type="number" min="0" step="0.01" className="input w-full" placeholder="Commitment amount" required />
+            </div>
+            <div>
+              <label className="label">Due day</label>
+              <input name="dueDay" value={commitmentForm.dueDay} onChange={updateCommitmentField} type="number" min="1" max="31" className="input w-full" placeholder="Day" required />
+            </div>
+            <div>
+              <label className="label">Category</label>
+              <input name="category" value={commitmentForm.category} onChange={updateCommitmentField} className="input w-full" placeholder="Bills" />
+            </div>
+          </div>
+          <div className="flex gap-2">
+            {editingCommitmentId && <button type="button" onClick={cancelCommitmentEdit} className="rounded-lg border border-slate-200 px-4 py-2 text-sm dark:border-slate-700">Cancel</button>}
+            <button className={`inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white ${selectedTheme.button}`}>
+              {editingCommitmentId ? <Save size={16} /> : <Plus size={16} />} {editingCommitmentId ? "Save commitment" : "Add commitment"}
+            </button>
+          </div>
+        </form>
+        <div className="mt-5 divide-y divide-slate-100 rounded-lg border border-slate-200 dark:divide-slate-800 dark:border-slate-800">
+          {commitments.map((item) => (
+            <div key={item.id} className="grid grid-cols-[1fr_120px_90px_132px] items-center gap-3 p-3 text-sm max-lg:grid-cols-2 max-sm:grid-cols-1">
+              <div>
+                <p className="font-medium">{item.name}</p>
+                <p className="text-slate-500 dark:text-slate-400">{item.category}</p>
+              </div>
+              <span>{money(item.amount)}</span>
+              <span>Day {item.dueDay}</span>
+              <div className="flex gap-2">
+                <button onClick={() => onLogCommitment(item)} className="grid h-9 w-9 place-items-center rounded-lg border border-slate-200 dark:border-slate-700" aria-label={`Log ${item.name}`} title="Log this month">
+                  <Table2 size={16} />
+                </button>
+                <button onClick={() => editCommitment(item)} className="grid h-9 w-9 place-items-center rounded-lg border border-slate-200 dark:border-slate-700" aria-label={`Edit ${item.name}`} title="Edit">
+                  <Pencil size={16} />
+                </button>
+                <button onClick={() => onDeleteCommitment(item.id)} className="grid h-9 w-9 place-items-center rounded-lg border border-slate-200 text-rose-600 dark:border-slate-700" aria-label={`Delete ${item.name}`} title="Delete">
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            </div>
+          ))}
+          {!commitments.length && <p className="p-3 text-sm text-slate-500 dark:text-slate-400">No monthly commitments added.</p>}
         </div>
       </Panel>
       <Panel title="Appearance">

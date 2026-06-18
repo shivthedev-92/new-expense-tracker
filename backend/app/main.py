@@ -52,6 +52,18 @@ def initialize_database() -> None:
                 connection.execute(text("ALTER TABLE transactions ADD COLUMN excluded_from_totals BOOLEAN NOT NULL DEFAULT FALSE"))
             if "alias" not in columns:
                 connection.execute(text("ALTER TABLE transactions ADD COLUMN alias VARCHAR(160)"))
+            loan_columns = {column["name"] for column in inspect(connection).get_columns("loans")}
+            if "account_type" not in loan_columns:
+                connection.execute(text("ALTER TABLE loans ADD COLUMN account_type VARCHAR(40) NOT NULL DEFAULT 'loan'"))
+            if "tenure_months" not in loan_columns:
+                connection.execute(text("ALTER TABLE loans ADD COLUMN tenure_months INTEGER"))
+            if "periods_paid" not in loan_columns:
+                connection.execute(text("ALTER TABLE loans ADD COLUMN periods_paid INTEGER"))
+            for column_name in ["credit_limit", "card_outstanding", "emi_outstanding", "monthly_emi", "minimum_due"]:
+                if column_name not in loan_columns:
+                    connection.execute(text(f"ALTER TABLE loans ADD COLUMN {column_name} FLOAT"))
+            if "emi_plans" not in loan_columns:
+                connection.execute(text("ALTER TABLE loans ADD COLUMN emi_plans JSON"))
     except SQLAlchemyError as exc:
         print(f"Database initialization skipped: {exc}")
 
@@ -100,8 +112,8 @@ def seed_user_data(db: Session, user: User) -> None:
                 spent_on=date.today() + timedelta(days=offset),
             )
         )
-    db.add(Loan(user_id=user.id, lender="Home Loan", principal=240000, outstanding=214500, emi=1850, due_day=1, interest_rate=6.4))
-    db.add(Loan(user_id=user.id, lender="Car Loan", principal=28000, outstanding=16400, emi=540, due_day=3, interest_rate=7.1))
+    db.add(Loan(user_id=user.id, account_type="loan", lender="Home Loan", principal=240000, outstanding=214500, emi=1850, due_day=1, interest_rate=6.4))
+    db.add(Loan(user_id=user.id, account_type="loan", lender="Car Loan", principal=28000, outstanding=16400, emi=540, due_day=3, interest_rate=7.1))
     db.commit()
 
 

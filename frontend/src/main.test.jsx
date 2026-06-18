@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { App, currentMonthPaymentStatus, getTransactionsForView, loanIncomeImpact, normalizeTransactionForm, parseRepaymentSchedule, parseStatementCsv } from "./main.jsx";
+import { App, categoryLeakageForMonth, currentMonthPaymentStatus, getTransactionsForView, loanIncomeImpact, monthlyComparisonData, normalizeTransactionForm, parseCardEmiPlans, parseRepaymentSchedule, parseStatementCsv } from "./main.jsx";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -80,6 +80,44 @@ describe("loan helpers", () => {
       ratio: 55,
       available: 3232,
     });
+  });
+
+  it("parses credit card EMI plan rows", () => {
+    expect(parseCardEmiPlans("loan name,purchased item,total loaned,current outstanding,monthly EMI,total EMIs,completed EMIs\nMacBook EMI,Laptop,90000,50000,7500,12,5")).toEqual([
+      { name: "MacBook EMI", purchased: "Laptop", loanedAmount: 90000, outstanding: 50000, monthlyEmi: 7500, apr: 0, roi: 0, totalEmis: 12, completedEmis: 5 },
+    ]);
+  });
+});
+
+describe("dashboard month helpers", () => {
+  it("builds six months of income and expense comparison data", () => {
+    const rows = [
+      { kind: "expense", category: "Food", amount: 120, date: "2026-06-14" },
+      { kind: "income", category: "Salary", amount: 2500, date: "2026-06-15" },
+      { kind: "expense", category: "Travel", amount: 900, date: "2026-05-01" },
+      { kind: "expense", category: "Education", amount: 700, date: "2026-04-12" },
+      { kind: "income", category: "Refund", amount: 300, date: "2026-04-20" },
+    ];
+
+    expect(monthlyComparisonData(rows, "2026-06", 90000)).toEqual([
+      { month: "2026-01", name: "Jan 2026", expense: 0, income: 0, hasData: false },
+      { month: "2026-02", name: "Feb 2026", expense: 0, income: 0, hasData: false },
+      { month: "2026-03", name: "Mar 2026", expense: 0, income: 0, hasData: false },
+      { month: "2026-04", name: "Apr 2026", expense: 700, income: 90300, hasData: true },
+      { month: "2026-05", name: "May 2026", expense: 900, income: 90000, hasData: true },
+      { month: "2026-06", name: "Jun 2026", expense: 120, income: 92500, hasData: true },
+    ]);
+  });
+
+  it("groups money leakage by category for a selected month", () => {
+    const rows = [
+      { kind: "expense", category: "Food", amount: 120, date: "2026-06-14" },
+      { kind: "expense", category: "Food", amount: 80, date: "2026-06-15" },
+      { kind: "expense", category: "Travel", amount: 900, date: "2026-05-01" },
+      { kind: "expense", category: "Bills", amount: 500, date: "2026-06-17", excludedFromTotals: true },
+    ];
+
+    expect(categoryLeakageForMonth(rows, "2026-06")).toEqual([{ name: "Food", value: 200 }]);
   });
 });
 
@@ -396,7 +434,7 @@ describe("Transaction Log", () => {
     expect(screen.getByRole("button", { name: /add new/i })).toHaveClass("bg-sky-600");
   });
 
-  it("applies the selected color theme to the monthly comparison graph", async () => {
+  it("keeps semantic colors on the monthly comparison graph across themes", async () => {
     const user = userEvent.setup();
     renderApp();
 
@@ -405,8 +443,8 @@ describe("Transaction Log", () => {
     await user.click(screen.getByRole("button", { name: "Dashboard" }));
 
     expect(screen.getByText("Monthly Comparison")).toBeInTheDocument();
-    expect(screen.getByTestId("monthly-comparison-chart")).toHaveAttribute("data-chart-color", "#0284c7");
-    expect(screen.getByTestId("monthly-comparison-chart")).toHaveAttribute("data-chart-alt-color", "#0891b2");
+    expect(screen.getByTestId("monthly-comparison-chart")).toHaveAttribute("data-income-color", "#16a34a");
+    expect(screen.getByTestId("monthly-comparison-chart")).toHaveAttribute("data-expense-color", "#dc2626");
   });
 
   it("adds and removes income sources from profile settings", async () => {
@@ -445,6 +483,37 @@ describe("Transaction Log", () => {
     await user.click(screen.getByRole("button", { name: "Add income source" }));
 
     expect(screen.getAllByText("₹90,000")).toHaveLength(3);
+  });
+
+  it("manages monthly commitments from profile settings and logs excluded entries", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "Profile Settings" }));
+
+    expect(screen.getByText("Monthly Commitments")).toBeInTheDocument();
+    expect(screen.getByText("Income after commitments")).toBeInTheDocument();
+
+    await user.type(screen.getByPlaceholderText("Rent, insurance, SIP"), "Gym Plan");
+    await user.type(screen.getByPlaceholderText("Commitment amount"), "2500");
+    await user.clear(screen.getByPlaceholderText("Day"));
+    await user.type(screen.getByPlaceholderText("Day"), "9");
+    await user.clear(screen.getByPlaceholderText("Bills"));
+    await user.type(screen.getByPlaceholderText("Bills"), "Wellness");
+    await user.click(screen.getByRole("button", { name: "Add commitment" }));
+
+    expect(screen.getByText("Gym Plan")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Edit Gym Plan" }));
+    const nameInput = screen.getByDisplayValue("Gym Plan");
+    await user.clear(nameInput);
+    await user.type(nameInput, "Gym Plus");
+    await user.click(screen.getByRole("button", { name: "Save commitment" }));
+
+    expect(screen.getByText("Gym Plus")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Log Gym Plus" }));
+    await user.click(screen.getByRole("button", { name: "Transaction Log" }));
+
+    expect(screen.getByRole("row", { name: /expense Unnamed Gym Plus Wellness Monthly Commitments Commitment 2026-06-09 ₹2,500 Excluded/i })).toBeInTheDocument();
   });
 
   it("sends text questions to the AI chat endpoint", async () => {
@@ -537,17 +606,22 @@ describe("Transaction Log", () => {
     expect(screen.getByText("Paid late")).toBeInTheDocument();
     expect(screen.getByText("Overdue")).toBeInTheDocument();
 
-    await user.type(screen.getByPlaceholderText("Lender"), "Personal Loan");
-    await user.type(screen.getByPlaceholderText("Principal"), "100000");
-    await user.type(screen.getByPlaceholderText("Outstanding"), "80000");
-    await user.type(screen.getByPlaceholderText("EMI"), "5000");
-    await user.clear(screen.getByPlaceholderText("Loan due day"));
-    await user.type(screen.getByPlaceholderText("Loan due day"), "15");
-    await user.type(screen.getByPlaceholderText("ROI %"), "11.5");
-    await user.click(screen.getByRole("button", { name: "Add Loan" }));
+    await user.click(screen.getByRole("button", { name: "New Account" }));
+    await user.type(screen.getByLabelText("Lender"), "Personal Loan");
+    await user.type(screen.getByLabelText("Principal"), "100000");
+    await user.type(screen.getByLabelText("Outstanding"), "80000");
+    await user.type(screen.getByLabelText("EMI"), "5000");
+    await user.type(screen.getByLabelText("Tenure / periods"), "24");
+    await user.type(screen.getByLabelText("Periods paid"), "4");
+    await user.clear(screen.getByLabelText("Loan due day"));
+    await user.type(screen.getByLabelText("Loan due day"), "15");
+    await user.type(screen.getByLabelText("ROI %"), "11.5");
+    await user.click(screen.getByRole("button", { name: "Add Account" }));
 
     expect(screen.getByText("Personal Loan")).toBeInTheDocument();
     expect(screen.getByText(/ROI 11.5%/)).toBeInTheDocument();
+    expect(screen.getByText("Tenure 24 months")).toBeInTheDocument();
+    expect(screen.getByText("Periods 4/24 paid")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Edit Personal Loan" }));
     const lenderInput = screen.getByDisplayValue("Personal Loan");
@@ -563,9 +637,50 @@ describe("Transaction Log", () => {
     );
 
     await waitFor(() => expect(screen.getByText(/Due 2026-06-15 · Paid 2026-06-14 · ₹5,000/)).toBeInTheDocument());
+    expect(screen.getByText("Periods 5/24 paid")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Delete Updated Personal Loan" }));
 
     expect(screen.queryByText("Updated Personal Loan")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "New Account" }));
+    await user.selectOptions(screen.getByLabelText("Account type"), "credit-card");
+    await user.type(screen.getByLabelText("Card name"), "Travel Card");
+    await user.type(screen.getByLabelText("Credit limit"), "150000");
+    await user.type(screen.getByLabelText("Total outstanding"), "93000");
+    await user.type(screen.getByLabelText("Minimum due"), "12000");
+    await user.clear(screen.getByLabelText("Card due day"));
+    await user.type(screen.getByLabelText("Card due day"), "12");
+    await user.click(screen.getByLabelText("Track converted-to-EMI purchases"));
+    await user.type(screen.getByLabelText("EMI loan name"), "Phone EMI");
+    await user.type(screen.getByLabelText("Purchased item"), "iPhone");
+    await user.type(screen.getByLabelText("Converted amount"), "90000");
+    await user.type(screen.getByLabelText("Current outstanding after EMIs"), "50000");
+    await user.type(screen.getByLabelText("Monthly EMI"), "7000");
+    await user.type(screen.getByLabelText("ROI %"), "14");
+    await user.type(screen.getByLabelText("Total EMIs"), "12");
+    await user.type(screen.getByLabelText("EMIs completed"), "5");
+    await user.click(screen.getByRole("button", { name: "Add Account" }));
+
+    expect(screen.getByText("Travel Card")).toBeInTheDocument();
+    expect(screen.getAllByText(/Credit Card · APR/).length).toBeGreaterThan(0);
+    expect(screen.getByText("Credit limit ₹1,50,000")).toBeInTheDocument();
+    expect(screen.getAllByText("Regular outstanding ₹43,000").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("EMI outstanding ₹50,000").length).toBeGreaterThan(0);
+    expect(screen.getByText("Phone EMI")).toBeInTheDocument();
+    expect(screen.getByText("iPhone")).toBeInTheDocument();
+    expect(screen.getAllByText("5/12").length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "New Account" }));
+    await user.selectOptions(screen.getByLabelText("Account type"), "credit-card");
+    await user.type(screen.getByLabelText("Card name"), "No EMI Card");
+    await user.type(screen.getByLabelText("Credit limit"), "100000");
+    await user.type(screen.getByLabelText("Total outstanding"), "43000");
+    await user.clear(screen.getByLabelText("Card due day"));
+    await user.type(screen.getByLabelText("Card due day"), "18");
+    await user.click(screen.getByRole("button", { name: "Add Account" }));
+
+    expect(screen.getByText("No EMI Card")).toBeInTheDocument();
+    expect(screen.getAllByText("Monthly EMI None").length).toBeGreaterThan(0);
   });
 });
